@@ -33,7 +33,12 @@ export function Resonance() {
   const isConsensus =
     negotiationLogs.length > 0 &&
     visibleLogs >= negotiationLogs.length &&
-    negotiationLogs.some((l) => l.type === "Consensus");
+    negotiationLogs.some((l) => l.type === "Consensus" && l.status === "accepted");
+
+  const isRejected =
+    negotiationLogs.length > 0 &&
+    visibleLogs >= negotiationLogs.length &&
+    negotiationLogs.some((l) => l.type === "Consensus" && l.status === "rejected");
 
   const handleHumanOverride = (e: React.FormEvent) => {
     e.preventDefault();
@@ -104,6 +109,16 @@ export function Resonance() {
                 <h3 className="font-display font-bold text-2xl">{datePlan.venue}</h3>
                 <p className="font-sans text-sm text-secondary">
                   {datePlan.date} · {datePlan.time}
+                </p>
+              </>
+            ) : isRejected ? (
+              <>
+                <div className="w-16 h-16 rounded-2xl bg-amber/15 backdrop-blur-md flex items-center justify-center border border-amber/40 text-2xl text-amber">
+                  !
+                </div>
+                <h3 className="font-display font-bold text-2xl">未达成一致</h3>
+                <p className="font-sans text-sm text-secondary">
+                  本轮协商结束，建议调整偏好后再试
                 </p>
               </>
             ) : (
@@ -185,11 +200,13 @@ export function Resonance() {
         </div>
         <div className="ml-6 flex flex-col gap-1 max-w-[70%]">
           <span className="font-sans font-semibold text-[11px] text-neon uppercase tracking-widest">
-            {isConsensus ? "CONFIRMED" : "NEGOTIATING"}
+            {isConsensus ? "CONFIRMED" : isRejected ? "REJECTED" : "NEGOTIATING"}
           </span>
           <p className="font-sans text-base text-white">
             {isConsensus
               ? `约会已确认：${datePlan?.venue}`
+              : isRejected
+                ? "本轮协商未达成一致"
               : "分析偏好 · 检查日历 · 制定方案..."}
           </p>
         </div>

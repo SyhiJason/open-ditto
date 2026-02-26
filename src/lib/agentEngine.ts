@@ -5,20 +5,46 @@
  * Handles:
  *  1. Context Engineering — builds rich system prompts from profile + memories
  *  2. Onboarding Chat     — trains the agent with daily conversation
- *  3. Agent-to-Agent      — multi-turn Gemini negotiation between two agents
+ *  3. Agent-to-Agent      — multi-turn negotiation between two agents
  *  4. Memory Extraction   — pulls key facts from chat turns
  */
 
-import OpenAI from "openai";
 import { Agent, Memory, NegotiationLog, DatePlan, UserProfile } from "../store/useStore";
 import { getFreeTime } from "./mcpTools";
 
-const API_KEY = process.env.MOONSHOT_API_KEY ?? "";
-const ai = new OpenAI({
-    apiKey: API_KEY,
-    baseURL: "https://api.moonshot.cn/v1",
-    dangerouslyAllowBrowser: true // Need this because we're calling from frontend
-});
+type ChatRole = "system" | "user" | "assistant";
+
+interface ChatMessage {
+    role: ChatRole;
+    content: string;
+}
+
+async function callChatModel(messages: ChatMessage[]): Promise<string> {
+    const response = await fetch("/api/ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            model: "moonshot-v1-8k",
+            messages,
+        }),
+    });
+
+    if (!response.ok) {
+        let details = `HTTP ${response.status}`;
+        try {
+            const errorBody = await response.json();
+            if (typeof errorBody?.error === "string") {
+                details = errorBody.error;
+            }
+        } catch {
+            // Ignore JSON parse failures and use status-based message.
+        }
+        throw new Error(`AI request failed: ${details}`);
+    }
+
+    const data = (await response.json()) as { content?: string };
+    return data.content ?? "";
+}
 
 // ─── 1. Context Engineering ─────────────────────────────────────────────────
 
@@ -86,21 +112,16 @@ ALWAYS end your reply with this JSON block on a new line:
 <memory>{"content": "...", "weight": 0.0}</memory>
 Weight: 0.9 = very important preference, 0.5 = casual mention, 0.2 = minor detail.`;
 
-    const history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = agent.chatHistory.slice(-10).map((m) => ({
+    const history: ChatMessage[] = agent.chatHistory.slice(-10).map((m) => ({
         role: m.role === "user" ? "user" : "assistant",
         content: m.text,
     }));
 
-    const response = await ai.chat.completions.create({
-        model: "moonshot-v1-8k",
-        messages: [
-            { role: "system", content: systemPrompt },
-            ...history,
-            { role: "user", content: userMessage }
-        ]
-    });
-
-    const raw = response.choices[0]?.message?.content ?? "";
+    const raw = await callChatModel([
+        { role: "system", content: systemPrompt },
+        ...history,
+        { role: "user", content: userMessage },
+    ]);
 
     // Parse memory tag
     const memMatch = raw.match(/<memory>(\{.*?\})<\/memory>/s);
@@ -108,13 +129,15 @@ Weight: 0.9 = very important preference, 0.5 = casual mention, 0.2 = minor detai
     if (memMatch) {
         try {
             const parsed = JSON.parse(memMatch[1]);
-            newMemory = {
-                id: crypto.randomUUID(),
-                content: parsed.content,
-                source: "chat",
-                weight: Math.min(1, Math.max(0, parsed.weight ?? 0.5)),
-                timestamp: Date.now(),
-            };
+            if (typeof parsed.content === "string" && parsed.content.trim()) {
+                newMemory = {
+                    id: crypto.randomUUID(),
+                    content: parsed.content.trim(),
+                    source: "chat",
+                    weight: Math.min(1, Math.max(0, Number(parsed.weight ?? 0.5))),
+                    timestamp: Date.now(),
+                };
+            }
         } catch {
             // ignore parse error
         }
@@ -144,31 +167,27 @@ export async function runAgentNegotiation(
 ): Promise<NegotiationResult> {
     const logs: NegotiationLog[] = [];
     const freeTime = getFreeTime(); // MCP tool call
+    const referencedMemory = [...userAgent.memories].sort((a, b) => b.weight - a.weight)[0] ?? null;
 
     // ── Turn 0: Memory recall (what does my user want?) ──────────────────────
     const userSystemPrompt = buildSystemPrompt(userAgent);
     const matchProfile = matchAgent.profile;
 
-    // ── Turn 1: Match agent proposes (simulated via Gemini) ──────────────────
-    const matchProposalResponse = await ai.chat.completions.create({
-        model: "moonshot-v1-8k",
-        messages: [
-            {
-                role: "system",
-                content: `You are an AI dating agent for ${matchAgent.name}.
+    // ── Turn 1: Match agent proposes ─────────────────────────────────────────
+    const proposalRaw = await callChatModel([
+        {
+            role: "system",
+            content: `You are an AI dating agent for ${matchAgent.name}.
 Profile: ${JSON.stringify(matchProfile, null, 2)}
 Propose a first date (venue + time) that aligns with your user's interests.
 The other agent's free slots are: ${JSON.stringify(freeTime)}.
 Reply in JSON: {"proposal": "...", "venue": "...", "time": "...", "date": "..."}`
-            },
-            {
-                role: "user",
-                content: "Generate a first date proposal."
-            }
-        ]
-    });
-
-    const proposalRaw = matchProposalResponse.choices[0]?.message?.content ?? "{}";
+        },
+        {
+            role: "user",
+            content: "Generate a first date proposal.",
+        },
+    ]);
     let proposal: { proposal: string; venue: string; time: string; date: string } = {
         proposal: "How about coffee this weekend?",
         venue: "Blue Bottle Coffee",
@@ -182,30 +201,28 @@ Reply in JSON: {"proposal": "...", "venue": "...", "time": "...", "date": "..."}
 
     logs.push({
         id: crypto.randomUUID(),
+        memoryId: referencedMemory?.id,
         type: "Memory",
         timestamp: new Date().toLocaleTimeString(),
-        perception: `${matchAgent.name}'s agent is proposing a date.`,
+        perception: referencedMemory
+            ? `Recall memory: ${referencedMemory.content}`
+            : `${matchAgent.name}'s agent is proposing a date.`,
         reasoning: `Proposal: "${proposal.proposal}". Checking venue against user preferences via RAG.`,
         action: `memory_fetch(query="venue preference, availability")`,
         status: "accepted",
     });
 
     // ── Turn 2: User agent evaluates ─────────────────────────────────────────
-    const evalResponse = await ai.chat.completions.create({
-        model: "moonshot-v1-8k",
-        messages: [
-            { role: "system", content: userSystemPrompt },
-            {
-                role: "user",
-                content: `The other agent proposed: "${proposal.proposal}" at ${proposal.venue} on ${proposal.date} at ${proposal.time}.
+    const evalRaw = await callChatModel([
+        { role: "system", content: userSystemPrompt },
+        {
+            role: "user",
+            content: `The other agent proposed: "${proposal.proposal}" at ${proposal.venue} on ${proposal.date} at ${proposal.time}.
 My user's availability: ${JSON.stringify(freeTime)}.
 Evaluate this proposal. Reply in JSON:
 {"accept": true/false, "counter": "optional counter-proposal", "reason": "...", "score": 0-100}`
-            }
-        ]
-    });
-
-    const evalRaw = evalResponse.choices[0]?.message?.content ?? "{}";
+        },
+    ]);
     let evaluation: { accept: boolean; counter: string; reason: string; score: number } = {
         accept: true,
         counter: "",
@@ -231,32 +248,102 @@ Evaluate this proposal. Reply in JSON:
         status: evaluation.accept ? "accepted" : "conditional",
     });
 
-    // ── Turn 3: Consensus ─────────────────────────────────────────────────────
-    const finalVenue = evaluation.accept ? proposal.venue : evaluation.counter || proposal.venue;
+    // ── Turn 3: Consensus check ───────────────────────────────────────────────
+    const counterProposal = evaluation.counter.trim();
+    let finalVenue: string | null = null;
+    let reachedConsensus = evaluation.accept;
 
-    logs.push({
-        id: crypto.randomUUID(),
-        type: "Consensus",
-        timestamp: new Date().toLocaleTimeString(),
-        perception: `Both agents agreed: ${finalVenue} on ${proposal.date} at ${proposal.time}.`,
-        reasoning: "Mutual availability confirmed. Venue meets both users' criteria.",
-        action: `schedule_meeting(venue="${finalVenue}", time="${proposal.time}", date="${proposal.date}")`,
-        status: "accepted",
-    });
+    if (evaluation.accept) {
+        finalVenue = proposal.venue;
+    } else if (counterProposal) {
+        const consensusRaw = await callChatModel([
+            {
+                role: "system",
+                content: `You are an AI dating agent for ${matchAgent.name}.
+Decide whether to accept a counter-proposal from another agent.
+Reply in JSON: {"acceptCounter": true/false, "reason": "..."}`,
+            },
+            {
+                role: "user",
+                content: `Counter-proposal: "${counterProposal}" for ${proposal.date} at ${proposal.time}.
+Original proposal was "${proposal.proposal}" at ${proposal.venue}.`,
+            },
+        ]);
 
-    const datePlan: DatePlan = {
-        venue: finalVenue,
-        time: proposal.time,
-        date: proposal.date,
-        notes: evaluation.reason,
-        confirmed: false,
-    };
+        let counterDecision: { acceptCounter: boolean; reason: string } = {
+            acceptCounter: false,
+            reason: "Counter-proposal not aligned with preferences.",
+        };
+
+        try {
+            const jsonMatch = consensusRaw.match(/\{[\s\S]*\}/);
+            if (jsonMatch) counterDecision = JSON.parse(jsonMatch[0]);
+        } catch {
+            // use default rejected result
+        }
+
+        reachedConsensus = Boolean(counterDecision.acceptCounter);
+        finalVenue = reachedConsensus ? counterProposal : null;
+
+        logs.push({
+            id: crypto.randomUUID(),
+            type: "Consensus",
+            timestamp: new Date().toLocaleTimeString(),
+            perception: reachedConsensus
+                ? `Counter-proposal accepted: ${counterProposal}.`
+                : "No consensus reached after counter-proposal.",
+            reasoning: counterDecision.reason,
+            action: reachedConsensus
+                ? `schedule_meeting(venue="${counterProposal}", time="${proposal.time}", date="${proposal.date}")`
+                : `end_negotiation(reason="counter rejected")`,
+            status: reachedConsensus ? "accepted" : "rejected",
+        });
+    } else {
+        logs.push({
+            id: crypto.randomUUID(),
+            type: "Consensus",
+            timestamp: new Date().toLocaleTimeString(),
+            perception: "No consensus reached.",
+            reasoning: "Proposal rejected and no actionable counter-proposal was provided.",
+            action: `end_negotiation(reason="rejected without counter")`,
+            status: "rejected",
+        });
+    }
+
+    if (evaluation.accept) {
+        logs.push({
+            id: crypto.randomUUID(),
+            type: "Consensus",
+            timestamp: new Date().toLocaleTimeString(),
+            perception: `Both agents agreed: ${proposal.venue} on ${proposal.date} at ${proposal.time}.`,
+            reasoning: "Mutual availability confirmed. Venue meets both users' criteria.",
+            action: `schedule_meeting(venue="${proposal.venue}", time="${proposal.time}", date="${proposal.date}")`,
+            status: "accepted",
+        });
+    }
+
+    const datePlan: DatePlan | null = reachedConsensus && finalVenue
+        ? {
+            venue: finalVenue,
+            time: proposal.time,
+            date: proposal.date,
+            notes: evaluation.reason,
+            confirmed: false,
+        }
+        : null;
+
+    const normalizedScore = Math.min(100, Math.max(0, Number(evaluation.score ?? 0)));
+    const compatibilityScore = reachedConsensus
+        ? normalizedScore
+        : Math.min(normalizedScore, 60);
 
     return {
-        compatibilityScore: Math.min(100, Math.max(0, evaluation.score)),
+        compatibilityScore,
         logs,
         datePlan,
-        summary: `Negotiation complete. Compatibility: ${evaluation.score}/100. Date at ${finalVenue}.`,
+        summary: reachedConsensus && finalVenue
+            ? `Negotiation complete. Compatibility: ${compatibilityScore}/100. Date at ${finalVenue}.`
+            : `Negotiation ended without consensus. Compatibility: ${compatibilityScore}/100.`,
     };
 }
 

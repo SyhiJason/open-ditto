@@ -44,6 +44,7 @@ export function Onboarding() {
     });
     const [fieldValue, setFieldValue] = useState("");
     const [selectedTags, setSelectedTags] = useState<string[]>([]);
+    const [validationError, setValidationError] = useState("");
 
     // Chat state
     const [messages, setMessages] = useState<{ role: "user" | "agent"; text: string }[]>([
@@ -61,15 +62,27 @@ export function Onboarding() {
     const currentStep = STEPS[step];
 
     const handleNext = () => {
-        const value =
-            currentStep.type === "tags"
-                ? selectedTags
-                : currentStep.type === "number"
-                    ? parseInt(fieldValue)
-                    : fieldValue;
+        let value: string | number | string[] = fieldValue;
 
-        if (currentStep.type === "tags" && selectedTags.length < 1) return;
-        if (currentStep.type !== "tags" && !fieldValue.trim()) return;
+        if (currentStep.type === "tags") {
+            if (selectedTags.length < 3 || selectedTags.length > 5) {
+                setValidationError("请至少选择 3 个兴趣，最多 5 个。");
+                return;
+            }
+            value = selectedTags;
+        } else if (currentStep.type === "number") {
+            if (!fieldValue.trim()) return;
+            const age = Number(fieldValue);
+            if (!Number.isInteger(age) || age < 18 || age > 100) {
+                setValidationError("请输入 18 到 100 之间的整数年龄。");
+                return;
+            }
+            value = age;
+        } else if (!fieldValue.trim()) {
+            return;
+        }
+
+        setValidationError("");
 
         const newData = {
             ...formData,
@@ -103,8 +116,13 @@ export function Onboarding() {
 
     const toggleTag = (tag: string) => {
         setSelectedTags((prev) =>
-            prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+            prev.includes(tag)
+                ? prev.filter((t) => t !== tag)
+                : prev.length >= 5
+                    ? prev
+                    : [...prev, tag]
         );
+        setValidationError("");
     };
 
     // ── Chat Logic ─────────────────────────────────────────────────────────────
@@ -255,7 +273,10 @@ export function Onboarding() {
                                 ) : currentStep.type === "textarea" ? (
                                     <textarea
                                         value={fieldValue}
-                                        onChange={(e) => setFieldValue(e.target.value)}
+                                        onChange={(e) => {
+                                            setFieldValue(e.target.value);
+                                            setValidationError("");
+                                        }}
                                         onKeyDown={(e) => {
                                             if (e.key === "Enter" && e.metaKey) handleNext();
                                         }}
@@ -268,12 +289,19 @@ export function Onboarding() {
                                     <input
                                         type={currentStep.type}
                                         value={fieldValue}
-                                        onChange={(e) => setFieldValue(e.target.value)}
+                                        onChange={(e) => {
+                                            setFieldValue(e.target.value);
+                                            setValidationError("");
+                                        }}
                                         onKeyDown={(e) => e.key === "Enter" && handleNext()}
                                         placeholder={currentStep.placeholder}
                                         autoFocus
                                         className="w-full bg-white/5 border border-white/10 rounded-xl px-5 py-4 text-white placeholder-white/20 focus:outline-none focus:border-neon/60 focus:ring-1 focus:ring-neon/30 transition-all mb-6 font-sans text-lg"
                                     />
+                                )}
+
+                                {validationError && (
+                                    <p className="text-xs text-amber mb-5">{validationError}</p>
                                 )}
 
                                 {/* Navigation */}

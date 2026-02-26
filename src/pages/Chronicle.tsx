@@ -4,8 +4,25 @@ import { twMerge } from "tailwind-merge";
 import { useStore, NegotiationLog } from "../store/useStore";
 
 export function Chronicle() {
-  const { negotiationLogs, userAgent, activeMatchId, matchAgents } = useStore();
+  const {
+    negotiationLogs,
+    userAgent,
+    activeMatchId,
+    matchAgents,
+    removeMemory,
+    adjustMemoryWeight,
+  } = useStore();
   const matchAgent = matchAgents.find((a) => a.id === activeMatchId);
+
+  const handleIgnoreMemory = (memoryId?: string) => {
+    if (!memoryId) return;
+    removeMemory(memoryId);
+  };
+
+  const handleBoostMemory = (memoryId?: string) => {
+    if (!memoryId) return;
+    adjustMemoryWeight(memoryId, 0.1);
+  };
 
   // Fall back to rich mock data if no real logs yet
   const events: NegotiationLog[] =
@@ -94,7 +111,12 @@ export function Chronicle() {
 
         <div className="flex flex-col gap-8 relative z-10">
           {events.map((event) => (
-            <TimelineCard key={event.id} event={event} />
+            <TimelineCard
+              key={event.id}
+              event={event}
+              onIgnoreMemory={handleIgnoreMemory}
+              onBoostMemory={handleBoostMemory}
+            />
           ))}
         </div>
       </div>
@@ -102,8 +124,18 @@ export function Chronicle() {
   );
 }
 
-function TimelineCard({ event }: { key?: React.Key; event: NegotiationLog }) {
+function TimelineCard({
+  event,
+  onIgnoreMemory,
+  onBoostMemory,
+}: {
+  key?: React.Key;
+  event: NegotiationLog;
+  onIgnoreMemory: (memoryId?: string) => void;
+  onBoostMemory: (memoryId?: string) => void;
+}) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const hasMemoryBinding = Boolean(event.memoryId);
 
   const nodeColors = {
     Memory: "bg-quantum shadow-[0_0_10px_rgba(0,102,255,0.6)]",
@@ -167,10 +199,24 @@ function TimelineCard({ event }: { key?: React.Key; event: NegotiationLog }) {
               </div>
 
               <div className="flex gap-2 mt-2">
-                <button className="px-3 py-1.5 rounded bg-white/5 hover:bg-white/10 text-xs font-medium text-white transition-colors">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onIgnoreMemory(event.memoryId);
+                  }}
+                  disabled={!hasMemoryBinding}
+                  className="px-3 py-1.5 rounded bg-white/5 hover:bg-white/10 text-xs font-medium text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
                   忽略此记忆
                 </button>
-                <button className="px-3 py-1.5 rounded bg-white/5 hover:bg-white/10 text-xs font-medium text-white transition-colors">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onBoostMemory(event.memoryId);
+                  }}
+                  disabled={!hasMemoryBinding}
+                  className="px-3 py-1.5 rounded bg-white/5 hover:bg-white/10 text-xs font-medium text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
                   强化此偏好
                 </button>
               </div>

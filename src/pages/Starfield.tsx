@@ -2,10 +2,19 @@ import { motion } from "motion/react";
 import { useStore } from "../store/useStore";
 import { Orb } from "../components/Orb";
 import { useNavigate } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { runAgentNegotiation } from "../lib/agentEngine";
 
 export function Starfield() {
-  const { userAgent, matchAgents, setAgentState } = useStore();
+  const {
+    userAgent,
+    matchAgents,
+    setAgentState,
+    setActiveMatch,
+    addNegotiationLog,
+    setDatePlan,
+    updateMatchScore,
+  } = useStore();
   const navigate = useNavigate();
   const [isColliding, setIsColliding] = useState(false);
 
@@ -13,15 +22,45 @@ export function Starfield() {
     // Logic to update position if needed
   };
 
-  const handleCollision = (targetId: string) => {
+  const handleCollision = async (targetId: string) => {
+    if (isColliding) return;
     setIsColliding(true);
     setAgentState("user", "Negotiating");
     setAgentState(targetId, "Negotiating");
+    setActiveMatch(targetId);
+
+    const targetAgent = matchAgents.find((agent) => agent.id === targetId);
+    if (!targetAgent) {
+      navigate("/resonance");
+      return;
+    }
+
+    try {
+      const result = await runAgentNegotiation(userAgent, targetAgent);
+      updateMatchScore(targetId, result.compatibilityScore);
+      result.logs.forEach(addNegotiationLog);
+      setDatePlan(result.datePlan);
+      setAgentState("user", result.datePlan ? "Confirmed" : "Idle");
+      setAgentState(targetId, result.datePlan ? "Confirmed" : "Reflecting");
+    } catch (err) {
+      setDatePlan(null);
+      addNegotiationLog({
+        id: crypto.randomUUID(),
+        type: "Consensus",
+        timestamp: new Date().toLocaleTimeString(),
+        perception: "协商中断：模型请求失败。",
+        reasoning: err instanceof Error ? err.message : "Unknown error",
+        action: 'retry_negotiation()',
+        status: "rejected",
+      });
+      setAgentState("user", "Idle");
+      setAgentState(targetId, "Reflecting");
+    }
 
     // Simulate transition delay
     setTimeout(() => {
       navigate("/resonance");
-    }, 1500);
+    }, 700);
   };
 
   return (

@@ -157,14 +157,23 @@ function SwipeCard({ agent, onSwipe, isTop }: SwipeCardProps) {
     );
 }
 
-// ─── Date Plan Modal ──────────────────────────────────────────────────────────
+// ─── Negotiation Result Modal ─────────────────────────────────────────────────
 
-function DatePlanModal({ onClose }: { onClose: () => void }) {
+type ModalState =
+    | { type: "success" }
+    | { type: "rejected"; message: string }
+    | { type: "error"; message: string };
+
+function NegotiationResultModal({
+    state,
+    onClose,
+}: {
+    state: ModalState;
+    onClose: () => void;
+}) {
     const { datePlan, activeMatchId, matchAgents } = useStore();
     const navigate = useNavigate();
     const matchAgent = matchAgents.find((a) => a.id === activeMatchId);
-
-    if (!datePlan) return null;
 
     return (
         <motion.div
@@ -178,40 +187,58 @@ function DatePlanModal({ onClose }: { onClose: () => void }) {
                 transition={{ type: "spring", damping: 25 }}
                 className="w-full max-w-lg glass-card rounded-3xl p-8"
             >
-                {/* Success Indicator */}
+                {/* Header */}
                 <div className="flex items-center gap-3 mb-6">
-                    <div className="w-10 h-10 rounded-full bg-emerald/20 border border-emerald/50 flex items-center justify-center">
-                        <span className="text-emerald text-lg">✓</span>
+                    <div className={`w-10 h-10 rounded-full border flex items-center justify-center ${state.type === "success"
+                            ? "bg-emerald/20 border-emerald/50"
+                            : "bg-amber/20 border-amber/50"
+                        }`}>
+                        <span className={`text-lg ${state.type === "success" ? "text-emerald" : "text-amber"}`}>
+                            {state.type === "success" ? "✓" : "!"}
+                        </span>
                     </div>
                     <div>
-                        <h3 className="font-display font-bold text-lg">约会已安排！</h3>
+                        <h3 className="font-display font-bold text-lg">
+                            {state.type === "success" ? "约会已安排！" : "本次未达成一致"}
+                        </h3>
                         <p className="text-secondary text-xs">
-                            {matchAgent?.profile?.name} 的 Agent 已确认
+                            {state.type === "success"
+                                ? `${matchAgent?.profile?.name} 的 Agent 已确认`
+                                : matchAgent?.profile?.name
+                                    ? `你和 ${matchAgent.profile.name} 的 Agent 需要更多沟通`
+                                    : "需要更多偏好信息再继续协商"}
                         </p>
                     </div>
                 </div>
 
-                {/* Date Details */}
-                <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6 flex flex-col gap-4">
-                    <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-neon/10 border border-neon/30 flex items-center justify-center text-neon">
-                            📍
+                {state.type === "success" && datePlan ? (
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6 flex flex-col gap-4">
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-neon/10 border border-neon/30 flex items-center justify-center text-neon">
+                                📍
+                            </div>
+                            <div>
+                                <p className="text-xs text-tertiary">地点</p>
+                                <p className="font-medium text-white">{datePlan.venue}</p>
+                            </div>
                         </div>
-                        <div>
-                            <p className="text-xs text-tertiary">地点</p>
-                            <p className="font-medium text-white">{datePlan.venue}</p>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-quantum/10 border border-quantum/30 flex items-center justify-center text-quantum">
+                                🗓
+                            </div>
+                            <div>
+                                <p className="text-xs text-tertiary">时间</p>
+                                <p className="font-medium text-white">{datePlan.date} · {datePlan.time}</p>
+                            </div>
                         </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-quantum/10 border border-quantum/30 flex items-center justify-center text-quantum">
-                            🗓
-                        </div>
-                        <div>
-                            <p className="text-xs text-tertiary">时间</p>
-                            <p className="font-medium text-white">{datePlan.date} · {datePlan.time}</p>
-                        </div>
+                ) : (
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6">
+                        <p className="text-sm text-secondary leading-relaxed">
+                            {state.type === "success" ? "" : state.message}
+                        </p>
                     </div>
-                </div>
+                )}
 
                 <div className="flex gap-3">
                     <button
@@ -222,9 +249,12 @@ function DatePlanModal({ onClose }: { onClose: () => void }) {
                     </button>
                     <button
                         onClick={onClose}
-                        className="flex-1 py-3.5 rounded-xl bg-emerald/20 border border-emerald/40 text-sm font-bold text-emerald hover:shadow-[0_0_20px_rgba(0,255,136,0.3)] transition-all"
+                        className={`flex-1 py-3.5 rounded-xl text-sm font-bold transition-all ${state.type === "success"
+                                ? "bg-emerald/20 border border-emerald/40 text-emerald hover:shadow-[0_0_20px_rgba(0,255,136,0.3)]"
+                                : "bg-amber/20 border border-amber/40 text-amber hover:shadow-[0_0_20px_rgba(255,184,0,0.25)]"
+                            }`}
                     >
-                        太棒了 ✓
+                        {state.type === "success" ? "太棒了 ✓" : "继续挑选"}
                     </button>
                 </div>
             </motion.div>
@@ -240,12 +270,10 @@ export function Discover() {
 
     const [cards, setCards] = useState([...matchAgents].sort((a, b) => b.score - a.score));
     const [isNegotiating, setIsNegotiating] = useState(false);
-    const [showDateModal, setShowDateModal] = useState(false);
-    const [swipedCount, setSwipedCount] = useState(0);
+    const [modalState, setModalState] = useState<ModalState | null>(null);
 
     const handleSwipe = async (action: CardAction, agent: Agent) => {
         setCards((prev) => prev.filter((c) => c.id !== agent.id));
-        setSwipedCount((n) => n + 1);
 
         if (action === "like") {
             setIsNegotiating(true);
@@ -257,20 +285,33 @@ export function Discover() {
                 // Update score and logs
                 updateMatchScore(agent.id, result.compatibilityScore);
                 result.logs.forEach(addNegotiationLog);
-                if (result.datePlan) setDatePlan(result.datePlan);
-                setIsNegotiating(false);
-                setShowDateModal(true);
+                setDatePlan(result.datePlan);
+
+                if (result.datePlan) {
+                    setModalState({ type: "success" });
+                } else {
+                    setModalState({
+                        type: "rejected",
+                        message: result.summary,
+                    });
+                }
             } catch (err) {
-                setIsNegotiating(false);
-                // Show fallback date plan
-                setDatePlan({
-                    venue: "Blue Bottle Coffee",
-                    time: "2:00 PM",
-                    date: "Saturday",
-                    notes: "Fallback plan",
-                    confirmed: false,
+                setDatePlan(null);
+                addNegotiationLog({
+                    id: crypto.randomUUID(),
+                    type: "Consensus",
+                    timestamp: new Date().toLocaleTimeString(),
+                    perception: "协商中断：模型请求失败。",
+                    reasoning: err instanceof Error ? err.message : "Unknown error",
+                    action: 'retry_negotiation()',
+                    status: "rejected",
                 });
-                setShowDateModal(true);
+                setModalState({
+                    type: "error",
+                    message: "AI 协商失败，请稍后重试。",
+                });
+            } finally {
+                setIsNegotiating(false);
             }
         }
     };
@@ -372,9 +413,12 @@ export function Discover() {
                 )}
             </AnimatePresence>
 
-            {/* Date Plan Modal */}
-            {showDateModal && (
-                <DatePlanModal onClose={() => setShowDateModal(false)} />
+            {/* Negotiation Result Modal */}
+            {modalState && (
+                <NegotiationResultModal
+                    state={modalState}
+                    onClose={() => setModalState(null)}
+                />
             )}
         </div>
     );

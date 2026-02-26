@@ -53,6 +53,7 @@ export interface DatePlan {
 
 export interface NegotiationLog {
   id: string;
+  memoryId?: string;
   type: "Memory" | "Decision" | "Consensus";
   timestamp: string;
   perception: string;
@@ -86,6 +87,8 @@ interface AppState {
   // Chat / Memory
   addChatMessage: (msg: ChatMessage) => void;
   addMemory: (memory: Memory) => void;
+  removeMemory: (id: string) => void;
+  adjustMemoryWeight: (id: string, delta: number) => void;
 
   // Agent positions / state
   setUserAgentPosition: (x: number, y: number) => void;
@@ -95,7 +98,7 @@ interface AppState {
   // Match session
   setActiveMatch: (id: string) => void;
   addNegotiationLog: (log: NegotiationLog) => void;
-  setDatePlan: (plan: DatePlan) => void;
+  setDatePlan: (plan: DatePlan | null) => void;
   updateMatchScore: (id: string, score: number) => void;
 }
 
@@ -219,6 +222,26 @@ export const useStore = create<AppState>()(
           },
         })),
 
+      removeMemory: (id) =>
+        set((state) => ({
+          userAgent: {
+            ...state.userAgent,
+            memories: state.userAgent.memories.filter((m) => m.id !== id),
+          },
+        })),
+
+      adjustMemoryWeight: (id, delta) =>
+        set((state) => ({
+          userAgent: {
+            ...state.userAgent,
+            memories: state.userAgent.memories.map((m) =>
+              m.id === id
+                ? { ...m, weight: Math.min(1, Math.max(0, m.weight + delta)) }
+                : m
+            ),
+          },
+        })),
+
       // ── Positions / State ─────────────────────────────────────────────────
       setUserAgentPosition: (x, y) =>
         set((state) => ({
@@ -245,7 +268,7 @@ export const useStore = create<AppState>()(
         }),
 
       // ── Match Session ─────────────────────────────────────────────────────
-      setActiveMatch: (id) => set({ activeMatchId: id, negotiationLogs: [] }),
+      setActiveMatch: (id) => set({ activeMatchId: id, negotiationLogs: [], datePlan: null }),
 
       addNegotiationLog: (log) =>
         set((state) => ({
