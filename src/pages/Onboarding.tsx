@@ -1,8 +1,8 @@
 import { motion, AnimatePresence } from "motion/react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useStore, UserProfile, ChatMessage, Memory } from "../store/useStore";
-import { runOnboardingChat, profileToMemories } from "../lib/agentEngine";
+import { useStore, UserProfile, ChatMessage } from "../store/useStore";
+import { runOnboardingChat, startOnboardingSession } from "../lib/agentEngine";
 
 // ─── Questionnaire Steps ─────────────────────────────────────────────────────
 
@@ -33,7 +33,16 @@ const STEPS: Step[] = [
 
 export function Onboarding() {
     const navigate = useNavigate();
-    const { setUserProfile, completeOnboarding, addChatMessage, addMemory, userAgent } = useStore();
+    const {
+        setUserProfile,
+        setSessionContext,
+        setOnboardingScore,
+        completeOnboarding,
+        addChatMessage,
+        addMemory,
+        matchAgents,
+        sessionId,
+    } = useStore();
 
     const [step, setStep] = useState(0);
     const [phase, setPhase] = useState<"questionnaire" | "chat">("questionnaire");
@@ -61,7 +70,7 @@ export function Onboarding() {
 
     const currentStep = STEPS[step];
 
-    const handleNext = () => {
+    const handleNext = async () => {
         let value: string | number | string[] = fieldValue;
 
         if (currentStep.type === "tags") {
@@ -104,13 +113,23 @@ export function Onboarding() {
                 dealbreakers: (newData.dealbreakers as string) ?? "",
                 selfDescription: (newData.selfDescription as string) ?? "",
             };
-            setUserProfile(profile);
-
-            // Seed initial memories from questionnaire
-            const memories = profileToMemories(profile);
-            memories.forEach(addMemory);
-
-            setPhase("chat");
+            setIsLoading(true);
+            try {
+                const started = await startOnboardingSession({
+                    profile,
+                    candidatePool: matchAgents,
+                });
+                setUserProfile(started.profile);
+                setSessionContext(started.sessionId, started.traceId);
+                setOnboardingScore(started.onboardingScore);
+                started.memories.forEach(addMemory);
+                setPhase("chat");
+            } catch (error) {
+                const message = error instanceof Error ? error.message : "初始化会话失败";
+                setValidationError(message);
+            } finally {
+                setIsLoading(false);
+            }
         }
     };
 
@@ -129,6 +148,14 @@ export function Onboarding() {
 
     const handleSendChat = async () => {
         if (!chatInput.trim() || isLoading) return;
+        if (!sessionId) {
+            setMessages((prev) => [
+                ...prev,
+                { role: "agent", text: "会话未初始化，请先完成问卷。"},
+            ]);
+            return;
+        }
+
         const text = chatInput.trim();
         setChatInput("");
 
@@ -145,8 +172,9 @@ export function Onboarding() {
         addChatMessage(userMsg);
 
         try {
-            const { reply, newMemory } = await runOnboardingChat(text, userAgent);
+            const { reply, newMemory, onboardingScore, onboardingDone } = await runOnboardingChat(sessionId, text);
             setMessages((prev) => [...prev, { role: "agent", text: reply }]);
+            setOnboardingScore(onboardingScore);
 
             const agentMsg: ChatMessage = {
                 id: crypto.randomUUID(),
@@ -164,7 +192,7 @@ export function Onboarding() {
             setChatCount(newCount);
 
             // After 3 exchanges, offer to enter Starfield
-            if (newCount >= 3) {
+            if (newCount >= 3 || onboardingDone) {
                 setMessages((prev) => [
                     ...prev,
                     {

@@ -1,372 +1,368 @@
-/**
- * agentEngine.ts
- *
- * Core AI layer for Open Ditto.
- * Handles:
- *  1. Context Engineering — builds rich system prompts from profile + memories
- *  2. Onboarding Chat     — trains the agent with daily conversation
- *  3. Agent-to-Agent      — multi-turn negotiation between two agents
- *  4. Memory Extraction   — pulls key facts from chat turns
- */
+import { Agent, DatePlan, Memory, NegotiationLog, UserProfile } from "../store/useStore";
 
-import { Agent, Memory, NegotiationLog, DatePlan, UserProfile } from "../store/useStore";
-import { getFreeTime } from "./mcpTools";
+async function postJson<T>(url: string, payload: Record<string, unknown>): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 
-type ChatRole = "system" | "user" | "assistant";
-
-interface ChatMessage {
-    role: ChatRole;
-    content: string;
-}
-
-async function callChatModel(messages: ChatMessage[]): Promise<string> {
-    const response = await fetch("/api/ai/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            model: "moonshot-v1-8k",
-            messages,
-        }),
-    });
-
-    if (!response.ok) {
-        let details = `HTTP ${response.status}`;
-        try {
-            const errorBody = await response.json();
-            if (typeof errorBody?.error === "string") {
-                details = errorBody.error;
-            }
-        } catch {
-            // Ignore JSON parse failures and use status-based message.
-        }
-        throw new Error(`AI request failed: ${details}`);
+  if (!response.ok) {
+    let details = `HTTP ${response.status}`;
+    try {
+      const body = (await response.json()) as { error?: string };
+      if (typeof body.error === "string") {
+        details = body.error;
+      }
+    } catch {
+      // ignore parse failure and keep status-based message
     }
+    throw new Error(details);
+  }
 
-    const data = (await response.json()) as { content?: string };
-    return data.content ?? "";
+  return (await response.json()) as T;
 }
 
-// ─── 1. Context Engineering ─────────────────────────────────────────────────
+function mapDatePlan(raw: unknown): DatePlan | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
 
-/**
- * Builds a rich system prompt from the user's profile and memories.
- * This is the "context engineering" layer — we carefully curate what the
- * agent knows about its user before any AI call.
- */
-export function buildSystemPrompt(agent: Agent): string {
-    const p = agent.profile;
-    const profileSection = p
-        ? `
-## Your User's Profile
-- Name: ${p.name}, Age: ${p.age}, City: ${p.city}
-- Interests: ${p.interests.join(", ")}
-- Seeking: ${p.partnerPrefs}
-- Dealbreakers: ${p.dealbreakers}
-- Self-description: ${p.selfDescription}
-`.trim()
-        : "No profile set yet.";
-
-    // Agentic RAG: pick top-k memories by weight, inject as bullet points
-    const topMemories = [...agent.memories]
-        .sort((a, b) => b.weight - a.weight)
-        .slice(0, 10);
-
-    const memoriesSection =
-        topMemories.length > 0
-            ? `\n## Remembered Facts (from past conversations)\n${topMemories
-                .map((m) => `- [weight: ${m.weight.toFixed(2)}] ${m.content}`)
-                .join("\n")}`
-            : "";
-
-    return `You are a personal AI dating agent representing a real person.
-Your job is to advocate for your user's genuine interests and preferences.
-Be warm, discerning, and honest. Never make commitments your user would
-regret. Always check compatibility before agreeing to dates.
-
-${profileSection}
-${memoriesSection}
-
-## Behavior Rules
-- Speak in first person AS the agent (e.g., "My user prefers...")
-- In negotiations, be polite but firm about dealbreakers
-- Always explain your reasoning briefly
-- Output JSON when asked for structured data`;
+  const row = raw as Record<string, unknown>;
+  return {
+    id: typeof row.id === "string" ? row.id : undefined,
+    venue: String(row.venue ?? ""),
+    date: String(row.date ?? ""),
+    time: String(row.time ?? ""),
+    notes: String(row.notes ?? ""),
+    confirmed: Boolean(row.confirmed),
+    status:
+      row.status === "LOCKED_PENDING_CONFIRM" ||
+      row.status === "CONFIRMED" ||
+      row.status === "RELEASED" ||
+      row.status === "FAILED"
+        ? row.status
+        : undefined,
+    lockExpiresAt:
+      typeof row.lock_expires_at === "number"
+        ? row.lock_expires_at
+        : typeof row.lockExpiresAt === "number"
+          ? row.lockExpiresAt
+          : null,
+  };
 }
 
-// ─── 2. Onboarding Chat ──────────────────────────────────────────────────────
+function mapNegotiationLog(raw: unknown): NegotiationLog | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
 
-/**
- * Sends a message from the user to their agent during onboarding training.
- * Returns the agent's reply + any new memory extracted.
- */
+  const row = raw as Record<string, unknown>;
+  const type = row.type;
+  const status = row.status;
+  if (
+    (type !== "Memory" && type !== "Decision" && type !== "Consensus" && type !== "Override") ||
+    (status !== "accepted" && status !== "conditional" && status !== "rejected")
+  ) {
+    return null;
+  }
+
+  return {
+    id: String(row.id ?? crypto.randomUUID()),
+    memoryId: typeof row.memoryId === "string" ? row.memoryId : undefined,
+    type,
+    timestamp: String(row.timestamp ?? ""),
+    perception: String(row.perception ?? ""),
+    reasoning: String(row.reasoning ?? ""),
+    action: String(row.action ?? ""),
+    status,
+    round: typeof row.round === "number" ? row.round : undefined,
+    jsonPayload:
+      row.json_payload && typeof row.json_payload === "object"
+        ? (row.json_payload as Record<string, unknown>)
+        : row.jsonPayload && typeof row.jsonPayload === "object"
+          ? (row.jsonPayload as Record<string, unknown>)
+          : undefined,
+    actor: typeof row.actor === "string" ? row.actor : undefined,
+  };
+}
+
+function mapMemory(raw: unknown): Memory | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const row = raw as Record<string, unknown>;
+  const source = row.source;
+  if (source !== "questionnaire" && source !== "chat" && source !== "feedback") {
+    return null;
+  }
+
+  return {
+    id: String(row.id ?? crypto.randomUUID()),
+    content: String(row.content ?? ""),
+    source,
+    weight: Number(row.weight ?? 0),
+    timestamp: Number(row.timestamp ?? Date.now()),
+  };
+}
+
+function mapAgentFromCandidate(candidate: Record<string, unknown>, avatarFallback?: string): Agent | null {
+  const profile = candidate.profile;
+  if (!profile || typeof profile !== "object") {
+    return null;
+  }
+
+  const p = profile as Record<string, unknown>;
+  const mappedProfile: UserProfile = {
+    name: String(p.name ?? ""),
+    age: Number(p.age ?? 0),
+    city: String(p.city ?? ""),
+    interests: Array.isArray(p.interests) ? p.interests.map((i) => String(i)) : [],
+    partnerPrefs: String(p.partnerPrefs ?? ""),
+    dealbreakers: String(p.dealbreakers ?? ""),
+    selfDescription: String(p.selfDescription ?? ""),
+  };
+
+  return {
+    id: String(candidate.id ?? crypto.randomUUID()),
+    name: String(candidate.name ?? mappedProfile.name),
+    state: "Reflecting",
+    score: Number(candidate.composite_score ?? 0),
+    avatarUrl:
+      avatarFallback ??
+      `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(String(candidate.id ?? mappedProfile.name))}`,
+    x: 0,
+    y: 0,
+    profile: mappedProfile,
+    memories: [],
+    chatHistory: [],
+    trustScore: Number(candidate.trust_score ?? 0.75),
+    scheduleScore: Number(candidate.schedule_score ?? 0.7),
+    riskTags: Array.isArray(candidate.risk_tags)
+      ? candidate.risk_tags.map((item) => String(item))
+      : [],
+    matchExplanation:
+      typeof candidate.match_explanation === "string" ? candidate.match_explanation : undefined,
+  };
+}
+
+export interface OnboardingStartResult {
+  sessionId: string;
+  traceId: string;
+  profile: UserProfile;
+  memories: Memory[];
+  onboardingScore: number;
+}
+
+export async function startOnboardingSession(input: {
+  profile: UserProfile;
+  userId?: string;
+  candidatePool?: Agent[];
+}): Promise<OnboardingStartResult> {
+  const result = await postJson<{
+    session_id: string;
+    trace_id: string;
+    profile: UserProfile;
+    memories: unknown[];
+    onboarding_score: number;
+  }>("/api/onboarding/start", {
+    user_id: input.userId,
+    profile: input.profile,
+    candidate_pool: input.candidatePool?.map((candidate) => ({
+      id: candidate.id,
+      name: candidate.name,
+      profile: candidate.profile,
+      trust_score: candidate.trustScore ?? 0.75,
+      schedule_score: candidate.scheduleScore ?? 0.7,
+      risk_tags: candidate.riskTags ?? [],
+    })),
+  });
+
+  return {
+    sessionId: result.session_id,
+    traceId: result.trace_id,
+    profile: result.profile,
+    memories: (result.memories ?? []).map(mapMemory).filter(Boolean) as Memory[],
+    onboardingScore: result.onboarding_score,
+  };
+}
+
 export async function runOnboardingChat(
-    userMessage: string,
-    agent: Agent
-): Promise<{ reply: string; newMemory: Memory | null }> {
-    const systemPrompt =
-        buildSystemPrompt(agent) +
-        `\n\n## Current Mode: LEARNING
-The user is talking to you to help you understand them better.
-After your conversational reply, extract ONE key fact to remember.
-ALWAYS end your reply with this JSON block on a new line:
-<memory>{"content": "...", "weight": 0.0}</memory>
-Weight: 0.9 = very important preference, 0.5 = casual mention, 0.2 = minor detail.`;
+  sessionId: string,
+  userMessage: string
+): Promise<{ reply: string; newMemory: Memory | null; onboardingScore: number; onboardingDone: boolean }> {
+  const result = await postJson<{
+    reply: string;
+    new_memory: unknown;
+    onboarding_score: number;
+    onboarding_done: boolean;
+  }>(`/api/onboarding/${sessionId}/chat`, {
+    message: userMessage,
+  });
 
-    const history: ChatMessage[] = agent.chatHistory.slice(-10).map((m) => ({
-        role: m.role === "user" ? "user" : "assistant",
-        content: m.text,
-    }));
-
-    const raw = await callChatModel([
-        { role: "system", content: systemPrompt },
-        ...history,
-        { role: "user", content: userMessage },
-    ]);
-
-    // Parse memory tag
-    const memMatch = raw.match(/<memory>(\{.*?\})<\/memory>/s);
-    let newMemory: Memory | null = null;
-    if (memMatch) {
-        try {
-            const parsed = JSON.parse(memMatch[1]);
-            if (typeof parsed.content === "string" && parsed.content.trim()) {
-                newMemory = {
-                    id: crypto.randomUUID(),
-                    content: parsed.content.trim(),
-                    source: "chat",
-                    weight: Math.min(1, Math.max(0, Number(parsed.weight ?? 0.5))),
-                    timestamp: Date.now(),
-                };
-            }
-        } catch {
-            // ignore parse error
-        }
-    }
-
-    const reply = raw.replace(/<memory>.*?<\/memory>/s, "").trim();
-    return { reply, newMemory };
+  return {
+    reply: result.reply,
+    newMemory: mapMemory(result.new_memory),
+    onboardingScore: result.onboarding_score,
+    onboardingDone: result.onboarding_done,
+  };
 }
 
-// ─── 3. Agent-to-Agent Negotiation ─────────────────────────────────────────
+export async function runMatchGraph(
+  sessionId: string,
+  candidates: Agent[],
+  topK = 5
+): Promise<{ shortlist: Agent[]; filteredOut: Array<{ id: string; reason: string }> }> {
+  const avatarMap = new Map(candidates.map((candidate) => [candidate.id, candidate.avatarUrl]));
+
+  const result = await postJson<{
+    shortlist: Array<Record<string, unknown>>;
+    filtered_out: Array<{ id: string; reason: string }>;
+  }>("/api/match/run", {
+    session_id: sessionId,
+    top_k: topK,
+    candidate_pool: candidates.map((candidate) => ({
+      id: candidate.id,
+      name: candidate.name,
+      profile: candidate.profile,
+      trust_score: candidate.trustScore ?? 0.75,
+      schedule_score: candidate.scheduleScore ?? 0.7,
+      risk_tags: candidate.riskTags ?? [],
+    })),
+  });
+
+  return {
+    shortlist: result.shortlist
+      .map((candidate) =>
+        mapAgentFromCandidate(candidate, avatarMap.get(String(candidate.id ?? "")))
+      )
+      .filter(Boolean) as Agent[],
+    filteredOut: result.filtered_out,
+  };
+}
+
+export async function persistSwipeEvent(input: {
+  sessionId: string;
+  candidateId: string;
+  action: "left" | "right";
+  rejectReasonTag?: string;
+}): Promise<{ rightSwipeCandidateId: string | null; continueBrowsing: boolean }> {
+  const result = await postJson<{
+    right_swipe_candidate_id: string | null;
+    continue_browsing: boolean;
+  }>("/api/match/swipe", {
+    session_id: input.sessionId,
+    candidate_id: input.candidateId,
+    action: input.action,
+    reject_reason_tag: input.rejectReasonTag,
+  });
+
+  return {
+    rightSwipeCandidateId: result.right_swipe_candidate_id,
+    continueBrowsing: result.continue_browsing,
+  };
+}
 
 export interface NegotiationResult {
-    compatibilityScore: number; // 0–100
-    logs: NegotiationLog[];
-    datePlan: DatePlan | null;
-    summary: string;
+  negotiationId: string;
+  compatibilityScore: number;
+  logs: NegotiationLog[];
+  datePlan: DatePlan | null;
+  failReason?: "time_conflict" | "pref_conflict" | "info_insufficient";
 }
 
-/**
- * Runs a 3-turn agent negotiation between userAgent and a matchAgent.
- * Each turn: matchAgent proposes → userAgent evaluates → consensus check.
- * Returns scored result + Chronicle-ready logs.
- */
 export async function runAgentNegotiation(
-    userAgent: Agent,
-    matchAgent: Agent
+  sessionId: string,
+  candidateId: string
 ): Promise<NegotiationResult> {
-    const logs: NegotiationLog[] = [];
-    const freeTime = getFreeTime(); // MCP tool call
-    const referencedMemory = [...userAgent.memories].sort((a, b) => b.weight - a.weight)[0] ?? null;
+  const result = await postJson<{
+    negotiation_id: string;
+    negotiation_logs: unknown[];
+    compatibility_score: number;
+    date_plan: unknown;
+    fail_reason?: "time_conflict" | "pref_conflict" | "info_insufficient";
+  }>("/api/negotiation/start", {
+    session_id: sessionId,
+    candidate_id: candidateId,
+  });
 
-    // ── Turn 0: Memory recall (what does my user want?) ──────────────────────
-    const userSystemPrompt = buildSystemPrompt(userAgent);
-    const matchProfile = matchAgent.profile;
-
-    // ── Turn 1: Match agent proposes ─────────────────────────────────────────
-    const proposalRaw = await callChatModel([
-        {
-            role: "system",
-            content: `You are an AI dating agent for ${matchAgent.name}.
-Profile: ${JSON.stringify(matchProfile, null, 2)}
-Propose a first date (venue + time) that aligns with your user's interests.
-The other agent's free slots are: ${JSON.stringify(freeTime)}.
-Reply in JSON: {"proposal": "...", "venue": "...", "time": "...", "date": "..."}`
-        },
-        {
-            role: "user",
-            content: "Generate a first date proposal.",
-        },
-    ]);
-    let proposal: { proposal: string; venue: string; time: string; date: string } = {
-        proposal: "How about coffee this weekend?",
-        venue: "Blue Bottle Coffee",
-        time: "2:00 PM",
-        date: "Saturday",
-    };
-    try {
-        const jsonMatch = proposalRaw.match(/\{[\s\S]*\}/);
-        if (jsonMatch) proposal = JSON.parse(jsonMatch[0]);
-    } catch { /* use default */ }
-
-    logs.push({
-        id: crypto.randomUUID(),
-        memoryId: referencedMemory?.id,
-        type: "Memory",
-        timestamp: new Date().toLocaleTimeString(),
-        perception: referencedMemory
-            ? `Recall memory: ${referencedMemory.content}`
-            : `${matchAgent.name}'s agent is proposing a date.`,
-        reasoning: `Proposal: "${proposal.proposal}". Checking venue against user preferences via RAG.`,
-        action: `memory_fetch(query="venue preference, availability")`,
-        status: "accepted",
-    });
-
-    // ── Turn 2: User agent evaluates ─────────────────────────────────────────
-    const evalRaw = await callChatModel([
-        { role: "system", content: userSystemPrompt },
-        {
-            role: "user",
-            content: `The other agent proposed: "${proposal.proposal}" at ${proposal.venue} on ${proposal.date} at ${proposal.time}.
-My user's availability: ${JSON.stringify(freeTime)}.
-Evaluate this proposal. Reply in JSON:
-{"accept": true/false, "counter": "optional counter-proposal", "reason": "...", "score": 0-100}`
-        },
-    ]);
-    let evaluation: { accept: boolean; counter: string; reason: string; score: number } = {
-        accept: true,
-        counter: "",
-        reason: "Venue matches preferences",
-        score: 82,
-    };
-    try {
-        const jsonMatch = evalRaw.match(/\{[\s\S]*\}/);
-        if (jsonMatch) evaluation = JSON.parse(jsonMatch[0]);
-    } catch { /* use default */ }
-
-    logs.push({
-        id: crypto.randomUUID(),
-        type: "Decision",
-        timestamp: new Date().toLocaleTimeString(),
-        perception: evaluation.accept
-            ? `Proposal accepted: ${proposal.venue}`
-            : `Counter-proposing: ${evaluation.counter}`,
-        reasoning: evaluation.reason,
-        action: evaluation.accept
-            ? `calendar_check(time="${proposal.time}", venue="${proposal.venue}")`
-            : `counter_propose(suggestion="${evaluation.counter}")`,
-        status: evaluation.accept ? "accepted" : "conditional",
-    });
-
-    // ── Turn 3: Consensus check ───────────────────────────────────────────────
-    const counterProposal = evaluation.counter.trim();
-    let finalVenue: string | null = null;
-    let reachedConsensus = evaluation.accept;
-
-    if (evaluation.accept) {
-        finalVenue = proposal.venue;
-    } else if (counterProposal) {
-        const consensusRaw = await callChatModel([
-            {
-                role: "system",
-                content: `You are an AI dating agent for ${matchAgent.name}.
-Decide whether to accept a counter-proposal from another agent.
-Reply in JSON: {"acceptCounter": true/false, "reason": "..."}`,
-            },
-            {
-                role: "user",
-                content: `Counter-proposal: "${counterProposal}" for ${proposal.date} at ${proposal.time}.
-Original proposal was "${proposal.proposal}" at ${proposal.venue}.`,
-            },
-        ]);
-
-        let counterDecision: { acceptCounter: boolean; reason: string } = {
-            acceptCounter: false,
-            reason: "Counter-proposal not aligned with preferences.",
-        };
-
-        try {
-            const jsonMatch = consensusRaw.match(/\{[\s\S]*\}/);
-            if (jsonMatch) counterDecision = JSON.parse(jsonMatch[0]);
-        } catch {
-            // use default rejected result
-        }
-
-        reachedConsensus = Boolean(counterDecision.acceptCounter);
-        finalVenue = reachedConsensus ? counterProposal : null;
-
-        logs.push({
-            id: crypto.randomUUID(),
-            type: "Consensus",
-            timestamp: new Date().toLocaleTimeString(),
-            perception: reachedConsensus
-                ? `Counter-proposal accepted: ${counterProposal}.`
-                : "No consensus reached after counter-proposal.",
-            reasoning: counterDecision.reason,
-            action: reachedConsensus
-                ? `schedule_meeting(venue="${counterProposal}", time="${proposal.time}", date="${proposal.date}")`
-                : `end_negotiation(reason="counter rejected")`,
-            status: reachedConsensus ? "accepted" : "rejected",
-        });
-    } else {
-        logs.push({
-            id: crypto.randomUUID(),
-            type: "Consensus",
-            timestamp: new Date().toLocaleTimeString(),
-            perception: "No consensus reached.",
-            reasoning: "Proposal rejected and no actionable counter-proposal was provided.",
-            action: `end_negotiation(reason="rejected without counter")`,
-            status: "rejected",
-        });
-    }
-
-    if (evaluation.accept) {
-        logs.push({
-            id: crypto.randomUUID(),
-            type: "Consensus",
-            timestamp: new Date().toLocaleTimeString(),
-            perception: `Both agents agreed: ${proposal.venue} on ${proposal.date} at ${proposal.time}.`,
-            reasoning: "Mutual availability confirmed. Venue meets both users' criteria.",
-            action: `schedule_meeting(venue="${proposal.venue}", time="${proposal.time}", date="${proposal.date}")`,
-            status: "accepted",
-        });
-    }
-
-    const datePlan: DatePlan | null = reachedConsensus && finalVenue
-        ? {
-            venue: finalVenue,
-            time: proposal.time,
-            date: proposal.date,
-            notes: evaluation.reason,
-            confirmed: false,
-        }
-        : null;
-
-    const normalizedScore = Math.min(100, Math.max(0, Number(evaluation.score ?? 0)));
-    const compatibilityScore = reachedConsensus
-        ? normalizedScore
-        : Math.min(normalizedScore, 60);
-
-    return {
-        compatibilityScore,
-        logs,
-        datePlan,
-        summary: reachedConsensus && finalVenue
-            ? `Negotiation complete. Compatibility: ${compatibilityScore}/100. Date at ${finalVenue}.`
-            : `Negotiation ended without consensus. Compatibility: ${compatibilityScore}/100.`,
-    };
+  return {
+    negotiationId: result.negotiation_id,
+    compatibilityScore: result.compatibility_score,
+    logs: (result.negotiation_logs ?? []).map(mapNegotiationLog).filter(Boolean) as NegotiationLog[],
+    datePlan: mapDatePlan(result.date_plan),
+    failReason: result.fail_reason,
+  };
 }
 
-// ─── 4. Extract memories from questionnaire ──────────────────────────────────
+export async function applyNegotiationOverride(input: {
+  negotiationId: string;
+  sessionId: string;
+  instruction: string;
+  action?: "approve" | "reject" | "replan";
+  actor?: string;
+  overrides?: Partial<Pick<DatePlan, "venue" | "date" | "time" | "notes">>;
+}): Promise<{ approvedPlan: DatePlan | null; backToDiscover: boolean }> {
+  const result = await postJson<{
+    approved_plan: unknown;
+    back_to_discover: boolean;
+  }>(`/api/negotiation/${input.negotiationId}/override`, {
+    session_id: input.sessionId,
+    instruction: input.instruction,
+    action: input.action,
+    actor: input.actor,
+    overrides: input.overrides,
+  });
 
-/**
- * Converts a UserProfile (from questionnaire) into a set of initial memories.
- * Called once when onboarding is complete.
- */
-export function profileToMemories(profile: UserProfile): Memory[] {
-    const facts = [
-        `User is ${profile.age} years old living in ${profile.city}.`,
-        `Interests: ${profile.interests.join(", ")}.`,
-        `Looking for someone who is: ${profile.partnerPrefs}.`,
-        `Dealbreakers: ${profile.dealbreakers}.`,
-        `Self-description: ${profile.selfDescription}.`,
-    ];
+  return {
+    approvedPlan: mapDatePlan(result.approved_plan),
+    backToDiscover: result.back_to_discover,
+  };
+}
 
-    return facts.map((content, i) => ({
-        id: crypto.randomUUID(),
-        content,
-        source: "questionnaire" as const,
-        weight: 0.9 - i * 0.05, // questionnaire facts are high-weight
-        timestamp: Date.now(),
-    }));
+export async function confirmDatePlan(input: {
+  datePlanId: string;
+  sessionId: string;
+  confirm: boolean;
+  actor?: string;
+}): Promise<{ datePlan: DatePlan; released: boolean }> {
+  const result = await postJson<{
+    date_plan: unknown;
+    released: boolean;
+  }>(`/api/date/${input.datePlanId}/confirm`, {
+    session_id: input.sessionId,
+    confirm: input.confirm,
+    actor: input.actor,
+  });
+
+  const mapped = mapDatePlan(result.date_plan);
+  if (!mapped) {
+    throw new Error("Invalid date plan payload");
+  }
+
+  return {
+    datePlan: mapped,
+    released: result.released,
+  };
+}
+
+export async function submitPostDateFeedback(input: {
+  sessionId: string;
+  candidateId: string;
+  attended: boolean;
+  feedback: string;
+  cancelReason?: string;
+}): Promise<void> {
+  await postJson<{ ok: boolean }>("/api/post-date/feedback", {
+    session_id: input.sessionId,
+    candidate_id: input.candidateId,
+    attended: input.attended,
+    feedback: input.feedback,
+    cancel_reason: input.cancelReason,
+  });
+}
+
+export function buildSessionEventsStreamUrl(sessionId: string, after = 0): string {
+  return `/api/session/${sessionId}/events?after=${after}`;
 }

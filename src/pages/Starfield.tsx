@@ -3,14 +3,16 @@ import { useStore } from "../store/useStore";
 import { Orb } from "../components/Orb";
 import { useNavigate } from "react-router-dom";
 import { useState } from "react";
-import { runAgentNegotiation } from "../lib/agentEngine";
+import { persistSwipeEvent, runAgentNegotiation } from "../lib/agentEngine";
 
 export function Starfield() {
   const {
     userAgent,
+    sessionId,
     matchAgents,
     setAgentState,
     setActiveMatch,
+    setActiveNegotiationId,
     addNegotiationLog,
     setDatePlan,
     updateMatchScore,
@@ -24,6 +26,8 @@ export function Starfield() {
 
   const handleCollision = async (targetId: string) => {
     if (isColliding) return;
+    if (!sessionId) return;
+
     setIsColliding(true);
     setAgentState("user", "Negotiating");
     setAgentState(targetId, "Negotiating");
@@ -36,7 +40,13 @@ export function Starfield() {
     }
 
     try {
-      const result = await runAgentNegotiation(userAgent, targetAgent);
+      await persistSwipeEvent({
+        sessionId,
+        candidateId: targetId,
+        action: "right",
+      });
+      const result = await runAgentNegotiation(sessionId, targetId);
+      setActiveNegotiationId(result.negotiationId);
       updateMatchScore(targetId, result.compatibilityScore);
       result.logs.forEach(addNegotiationLog);
       setDatePlan(result.datePlan);

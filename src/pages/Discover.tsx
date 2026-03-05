@@ -1,9 +1,9 @@
 import { motion, useMotionValue, useTransform, AnimatePresence } from "motion/react";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStore, Agent } from "../store/useStore";
 import { verifyProfile } from "../lib/mcpTools";
-import { runAgentNegotiation } from "../lib/agentEngine";
+import { persistSwipeEvent, runAgentNegotiation, runMatchGraph } from "../lib/agentEngine";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -265,22 +265,77 @@ function NegotiationResultModal({
 // ─── Main Discover Page ───────────────────────────────────────────────────────
 
 export function Discover() {
-    const { matchAgents, userAgent, setActiveMatch, addNegotiationLog, setDatePlan, updateMatchScore } = useStore();
+    const {
+        matchAgents,
+        sessionId,
+        setActiveMatch,
+        setActiveNegotiationId,
+        replaceMatchAgents,
+        addNegotiationLog,
+        setDatePlan,
+        updateMatchScore,
+    } = useStore();
     const navigate = useNavigate();
 
     const [cards, setCards] = useState([...matchAgents].sort((a, b) => b.score - a.score));
     const [isNegotiating, setIsNegotiating] = useState(false);
     const [modalState, setModalState] = useState<ModalState | null>(null);
 
+    useEffect(() => {
+        if (!sessionId) return;
+        let cancelled = false;
+
+        void runMatchGraph(sessionId, matchAgents).then((result) => {
+            if (cancelled) return;
+            if (result.shortlist.length === 0) return;
+            replaceMatchAgents(result.shortlist);
+            setCards([...result.shortlist].sort((a, b) => b.score - a.score));
+        }).catch(() => {
+            // fallback to local ordering only
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [sessionId, replaceMatchAgents]);
+
     const handleSwipe = async (action: CardAction, agent: Agent) => {
+        if (!sessionId) {
+            setModalState({
+                type: "error",
+                message: "会话未初始化，请先完成 onboarding。",
+            });
+            return;
+        }
+
         setCards((prev) => prev.filter((c) => c.id !== agent.id));
+
+        if (action === "skip") {
+            try {
+                await persistSwipeEvent({
+                    sessionId,
+                    candidateId: agent.id,
+                    action: "left",
+                });
+            } catch {
+                // keep UI responsive even if event persistence fails
+            }
+            return;
+        }
 
         if (action === "like") {
             setIsNegotiating(true);
             setActiveMatch(agent.id);
 
             try {
-                const result = await runAgentNegotiation(userAgent, agent);
+                await persistSwipeEvent({
+                    sessionId,
+                    candidateId: agent.id,
+                    action: "right",
+                });
+
+                const result = await runAgentNegotiation(sessionId, agent.id);
+                setActiveNegotiationId(result.negotiationId);
 
                 // Update score and logs
                 updateMatchScore(agent.id, result.compatibilityScore);
@@ -292,7 +347,9 @@ export function Discover() {
                 } else {
                     setModalState({
                         type: "rejected",
-                        message: result.summary,
+                        message: result.failReason
+                            ? `协商失败原因：${result.failReason}`
+                            : "本轮协商未达成一致。",
                     });
                 }
             } catch (err) {
@@ -308,7 +365,7 @@ export function Discover() {
                 });
                 setModalState({
                     type: "error",
-                    message: "AI 协商失败，请稍后重试。",
+                    message: err instanceof Error ? err.message : "AI 协商失败，请稍后重试。",
                 });
             } finally {
                 setIsNegotiating(false);

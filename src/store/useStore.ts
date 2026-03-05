@@ -18,7 +18,7 @@ export interface UserProfile {
 export interface Memory {
   id: string;
   content: string;    // What the agent remembers
-  source: "questionnaire" | "chat";
+  source: "questionnaire" | "chat" | "feedback";
   weight: number;     // Relevance weight for RAG (0–1)
   timestamp: number;
 }
@@ -41,25 +41,35 @@ export interface Agent {
   profile?: UserProfile;
   memories: Memory[];
   chatHistory: ChatMessage[];
+  trustScore?: number;
+  scheduleScore?: number;
+  riskTags?: string[];
+  matchExplanation?: string;
 }
 
 export interface DatePlan {
+  id?: string;
   venue: string;
   time: string;
   date: string;
   notes: string;
   confirmed: boolean;
+  status?: "LOCKED_PENDING_CONFIRM" | "CONFIRMED" | "RELEASED" | "FAILED";
+  lockExpiresAt?: number | null;
 }
 
 export interface NegotiationLog {
   id: string;
   memoryId?: string;
-  type: "Memory" | "Decision" | "Consensus";
+  type: "Memory" | "Decision" | "Consensus" | "Override";
   timestamp: string;
   perception: string;
   reasoning: string;
   action: string;
   status: "accepted" | "conditional" | "rejected";
+  round?: number;
+  jsonPayload?: Record<string, unknown>;
+  actor?: string;
 }
 
 // ─── App State ─────────────────────────────────────────────────────────────
@@ -68,6 +78,9 @@ interface AppState {
   // Onboarding
   onboardingComplete: boolean;
   userProfile: UserProfile | null;
+  sessionId: string | null;
+  traceId: string | null;
+  onboardingScore: number;
 
   // Agents
   userAgent: Agent;
@@ -75,6 +88,7 @@ interface AppState {
 
   // Active match session
   activeMatchId: string | null;
+  activeNegotiationId: string | null;
   negotiationLogs: NegotiationLog[];
   datePlan: DatePlan | null;
 
@@ -82,6 +96,8 @@ interface AppState {
 
   // Onboarding
   setUserProfile: (profile: UserProfile) => void;
+  setSessionContext: (sessionId: string, traceId: string) => void;
+  setOnboardingScore: (score: number) => void;
   completeOnboarding: () => void;
 
   // Chat / Memory
@@ -97,6 +113,8 @@ interface AppState {
 
   // Match session
   setActiveMatch: (id: string) => void;
+  setActiveNegotiationId: (id: string | null) => void;
+  replaceMatchAgents: (agents: Agent[]) => void;
   addNegotiationLog: (log: NegotiationLog) => void;
   setDatePlan: (plan: DatePlan | null) => void;
   updateMatchScore: (id: string, score: number) => void;
@@ -186,9 +204,13 @@ export const useStore = create<AppState>()(
     (set) => ({
       onboardingComplete: false,
       userProfile: null,
+      sessionId: null,
+      traceId: null,
+      onboardingScore: 0,
       userAgent: defaultAgent,
       matchAgents: defaultMatchAgents,
       activeMatchId: null,
+      activeNegotiationId: null,
       negotiationLogs: [],
       datePlan: null,
 
@@ -200,8 +222,14 @@ export const useStore = create<AppState>()(
             ...state.userAgent,
             name: profile.name + "'s Agent",
             profile,
+            memories: [],
+            chatHistory: [],
           },
         })),
+
+      setSessionContext: (sessionId, traceId) => set({ sessionId, traceId }),
+
+      setOnboardingScore: (score) => set({ onboardingScore: score }),
 
       completeOnboarding: () => set({ onboardingComplete: true }),
 
@@ -268,7 +296,12 @@ export const useStore = create<AppState>()(
         }),
 
       // ── Match Session ─────────────────────────────────────────────────────
-      setActiveMatch: (id) => set({ activeMatchId: id, negotiationLogs: [], datePlan: null }),
+      setActiveMatch: (id) =>
+        set({ activeMatchId: id, activeNegotiationId: null, negotiationLogs: [], datePlan: null }),
+
+      setActiveNegotiationId: (id) => set({ activeNegotiationId: id }),
+
+      replaceMatchAgents: (agents) => set({ matchAgents: agents }),
 
       addNegotiationLog: (log) =>
         set((state) => ({
@@ -290,6 +323,9 @@ export const useStore = create<AppState>()(
       partialize: (state) => ({
         onboardingComplete: state.onboardingComplete,
         userProfile: state.userProfile,
+        sessionId: state.sessionId,
+        traceId: state.traceId,
+        onboardingScore: state.onboardingScore,
         userAgent: {
           ...state.userAgent,
           x: 0,

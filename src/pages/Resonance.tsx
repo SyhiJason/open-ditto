@@ -2,9 +2,20 @@ import { motion, AnimatePresence } from "motion/react";
 import React, { useState, useEffect, useRef } from "react";
 import { useStore } from "../store/useStore";
 import { useNavigate } from "react-router-dom";
+import { applyNegotiationOverride, confirmDatePlan } from "../lib/agentEngine";
 
 export function Resonance() {
-  const { userAgent, matchAgents, activeMatchId, negotiationLogs, datePlan } = useStore();
+  const {
+    userAgent,
+    sessionId,
+    activeMatchId,
+    activeNegotiationId,
+    matchAgents,
+    negotiationLogs,
+    datePlan,
+    setDatePlan,
+    addNegotiationLog,
+  } = useStore();
   const navigate = useNavigate();
 
   const matchAgent =
@@ -13,6 +24,7 @@ export function Resonance() {
   const [visibleLogs, setVisibleLogs] = useState(0);
   const [isHumanOverride, setIsHumanOverride] = useState(false);
   const [humanInput, setHumanInput] = useState("");
+  const [overrideBusy, setOverrideBusy] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // Incrementally reveal logs for dramatic effect
@@ -40,11 +52,65 @@ export function Resonance() {
     visibleLogs >= negotiationLogs.length &&
     negotiationLogs.some((l) => l.type === "Consensus" && l.status === "rejected");
 
-  const handleHumanOverride = (e: React.FormEvent) => {
+  const handleHumanOverride = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!humanInput.trim()) return;
-    setHumanInput("");
-    setIsHumanOverride(false);
+    const raw = humanInput.trim();
+    if (!raw) return;
+    if (!sessionId) return;
+
+    setOverrideBusy(true);
+    try {
+      if (raw.startsWith("/confirm") && datePlan?.id) {
+        const confirmed = await confirmDatePlan({
+          datePlanId: datePlan.id,
+          sessionId,
+          confirm: true,
+          actor: "human_user",
+        });
+        setDatePlan(confirmed.datePlan);
+        addNegotiationLog({
+          id: crypto.randomUUID(),
+          type: "Override",
+          timestamp: new Date().toLocaleTimeString(),
+          perception: "人工确认了当前约会方案。",
+          reasoning: "执行 /confirm 指令",
+          action: `confirmDatePlan(id=\"${datePlan.id}\")`,
+          status: "accepted",
+          actor: "human_user",
+        });
+      } else if (activeNegotiationId) {
+        let action: "approve" | "reject" | "replan" = "replan";
+        if (raw.startsWith("/approve")) action = "approve";
+        if (raw.startsWith("/reject")) action = "reject";
+
+        const response = await applyNegotiationOverride({
+          negotiationId: activeNegotiationId,
+          sessionId,
+          instruction: raw,
+          action,
+          actor: "human_user",
+        });
+
+        setDatePlan(response.approvedPlan);
+        addNegotiationLog({
+          id: crypto.randomUUID(),
+          type: "Override",
+          timestamp: new Date().toLocaleTimeString(),
+          perception: `人工覆盖已执行：${action}`,
+          reasoning: raw,
+          action: `override(action=\"${action}\")`,
+          status: action === "reject" ? "rejected" : "accepted",
+          actor: "human_user",
+        });
+        if (response.backToDiscover) {
+          navigate("/discover");
+        }
+      }
+    } finally {
+      setHumanInput("");
+      setIsHumanOverride(false);
+      setOverrideBusy(false);
+    }
   };
 
   // No active match state
@@ -250,6 +316,7 @@ export function Resonance() {
                 placeholder="输入你的指令，覆盖 Agent..."
                 className="w-full bg-black/50 border border-quantum/50 rounded-xl px-6 py-4 text-white placeholder-white/30 focus:outline-none focus:border-quantum focus:ring-1 focus:ring-quantum transition-all"
                 autoFocus
+                disabled={overrideBusy}
               />
               <p className="text-xs text-quantum/70 mt-2 text-center">
                 手动干预将暂停 Agent 自主权
